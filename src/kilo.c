@@ -1,6 +1,5 @@
 /*** includes ***/
 
-#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,15 +41,15 @@ enum editorKey
 
 /*** data ***/
 
-typedef struct editorConfig
+struct editorConfig
 {
     int cx, cy;
     int screenrows;
     int screencols;
     struct termios orig_termios;
-} editorConfig;
+};
 
-editorConfig E;
+struct editorConfig E;
 
 /*** terminal ***/
 
@@ -230,17 +229,17 @@ int getWindowSize(int *rows, int *cols)
 
 /*** append buffer ***/
 
-typedef struct abuf
+struct abuf
 {
     char *b;
     int len;
-} abuf;
+};
 
 // clang-format off
 #define ABUF_INIT {NULL, 0}
 // clang-format on
 
-void abAppend(abuf *ab, const char *s, int len)
+void abAppend(struct abuf *ab, const char *s, int len)
 {
     char *new = realloc(ab->b, ab->len + len);
 
@@ -251,14 +250,14 @@ void abAppend(abuf *ab, const char *s, int len)
     ab->len += len;
 }
 
-void abFree(abuf *ab)
+void abFree(struct abuf *ab)
 {
     free(ab->b);
 }
 
 /*** output ***/
 
-void editorDrawRows(abuf *ab)
+void editorDrawRows(struct abuf *ab)
 {
     int y;
     for (y = 0; y < E.screenrows; y++)
@@ -294,7 +293,7 @@ void editorDrawRows(abuf *ab)
 
 void editorRefreshScreen(void)
 {
-    abuf ab = ABUF_INIT;
+    struct abuf ab = ABUF_INIT;
 
     abAppend(&ab, SEQ_HIDECURSOR, SIZEOFSEQ(SEQ_HIDECURSOR));
     abAppend(&ab, SEQ_MOVECURSORTOPLEFT, SIZEOFSEQ(SEQ_MOVECURSORTOPLEFT));
