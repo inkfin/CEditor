@@ -4,18 +4,33 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
 /*** defines ***/
 
+#define KILO_VERSION "0.0.1"
+
+#define SIZEOFSEQ(x) (sizeof(x) - 1)
+#define SEQ_HIDECURSOR "\x1b[?25l"
+#define SEQ_SHOWCURSOR "\x1b[?25h"
+#define SEQ_CLEARSCREEN "\x1b[2J"
+/* erases the part of the line to the right of the cursor */
+#define SEQ_ERASEINLINE0 "\x1b[K"
+#define SEQ_ERASEINLINE SEQ_ERASEINLINE0
+#define SEQ_MOVECURSORTOPLEFT "\x1b[H"
+#define SEQ_MOVECURSORBTMRIGHT "\x1b[999C\x1b[999B"
+#define SEQ_QUERY_CURSORLOC "\x1b[6n"
+
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 /*** data ***/
 
-typedef struct
+typedef struct editorConfig
 {
+    int cx, cy;
     int screenrows;
     int screencols;
     struct termios orig_termios;
@@ -27,8 +42,8 @@ editorConfig E;
 
 void die(const char *reason)
 {
-    write(STDOUT_FILENO, "\x1b[2J", 4); // clear whole screen
-    write(STDOUT_FILENO, "\x1b[H", 3);  // move cursor to 1;1
+    write(STDOUT_FILENO, SEQ_CLEARSCREEN, SIZEOFSEQ(SEQ_CLEARSCREEN));
+    write(STDOUT_FILENO, SEQ_MOVECURSORTOPLEFT, SIZEOFSEQ(SEQ_MOVECURSORTOPLEFT));
 
     perror(reason);
     exit(1);
@@ -64,7 +79,7 @@ void enableRawMode(void)
     }
 }
 
-char editorReadKey()
+char editorReadKey(void)
 {
     int nread;
     char c;
@@ -78,13 +93,47 @@ char editorReadKey()
     return c;
 }
 
+int getCursorPosition(int *rows, int *cols)
+{
+    char buf[32];
+    unsigned int i = 0;
+
+    if (write(STDOUT_FILENO, SEQ_QUERY_CURSORLOC, SIZEOFSEQ(SEQ_QUERY_CURSORLOC)) != SIZEOFSEQ(SEQ_QUERY_CURSORLOC))
+        return -1;
+
+    while (i < sizeof(buf) - 1)
+    {
+        if (read(STDIN_FILENO, &buf[i], 1) != 1)
+        {
+            break;
+        }
+        if (buf[i] == 'R')
+        {
+            break;
+        }
+        ++i;
+    }
+    buf[i] = '\0';
+
+    if (buf[0] != '\x1b' || buf[1] != '[')
+        return -1;
+    if (sscanf(&buf[2], "%d;%d", rows, cols) != 2)
+        return -1;
+
+    return 0;
+}
+
 int getWindowSize(int *rows, int *cols)
 {
     struct winsize ws;
 
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
     {
-        return -1;
+        // move the cursor right(C) 999 and down(B) 999
+        if (write(STDOUT_FILENO, SEQ_MOVECURSORBTMRIGHT, SIZEOFSEQ(SEQ_MOVECURSORBTMRIGHT)) !=
+            SIZEOFSEQ(SEQ_MOVECURSORBTMRIGHT))
+            return -1;
+        return getCursorPosition(rows, cols);
     }
     else
     {
@@ -94,38 +143,100 @@ int getWindowSize(int *rows, int *cols)
     }
 }
 
+/*** append buffer ***/
+
+typedef struct abuf
+{
+    char *b;
+    int len;
+} abuf;
+
+// clang-format off
+#define ABUF_INIT {NULL, 0}
+// clang-format on
+
+void abAppend(abuf *ab, const char *s, int len)
+{
+    char *new = realloc(ab->b, ab->len + len);
+
+    if (new == NULL)
+        return;
+    memcpy(&new[ab->len], s, len);
+    ab->b = new;
+    ab->len += len;
+}
+
+void abFree(abuf *ab)
+{
+    free(ab->b);
+}
+
 /*** output ***/
 
-void editorDrawRows()
+void editorDrawRows(abuf *ab)
 {
     int y;
     for (y = 0; y < E.screenrows; y++)
     {
-        write(STDOUT_FILENO, "~\r\n", 3);
+        if (y == E.screenrows / 3)
+        {
+            char welcome[80];
+            int welcomelen = snprintf(welcome, sizeof(welcome), "Kilo editor -- version %s", KILO_VERSION);
+            if (welcomelen > E.screencols)
+                welcomelen = E.screencols;
+            int padding = (E.screencols - welcomelen) / 2;
+            if (padding)
+            {
+                abAppend(ab, "~", 1);
+                --padding;
+            }
+            while (padding--)
+                abAppend(ab, " ", 1);
+            abAppend(ab, welcome, welcomelen);
+        }
+        else
+        {
+            abAppend(ab, "~", 1);
+        }
+
+        abAppend(ab, SEQ_ERASEINLINE, SIZEOFSEQ(SEQ_ERASEINLINE));
+        if (y < E.screenrows - 1)
+        {
+            abAppend(ab, "\r\n", 2);
+        }
     }
 }
 
-void editorRefreshScreen()
+void editorRefreshScreen(void)
 {
-    write(STDOUT_FILENO, "\x1b[2J", 4); // clear whole screen
-    write(STDOUT_FILENO, "\x1b[H", 3);  // move cursor to 1;1
+    abuf ab = ABUF_INIT;
 
-    editorDrawRows();
+    abAppend(&ab, SEQ_HIDECURSOR, SIZEOFSEQ(SEQ_HIDECURSOR));
+    abAppend(&ab, SEQ_MOVECURSORTOPLEFT, SIZEOFSEQ(SEQ_MOVECURSORTOPLEFT));
 
-    write(STDOUT_FILENO, "\x1b[H", 3);
+    editorDrawRows(&ab);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+    abAppend(&ab, buf, strlen(buf));
+
+    abAppend(&ab, SEQ_SHOWCURSOR, SIZEOFSEQ(SEQ_SHOWCURSOR));
+
+    write(STDOUT_FILENO, ab.b, ab.len);
+    abFree(&ab);
 }
 
 /*** input ***/
 
-void editorProcessKeypress()
+void editorProcessKeypress(void)
 {
     char c = editorReadKey();
 
     switch (c)
     {
     case CTRL_KEY('q'):
-        write(STDOUT_FILENO, "\x1b[2J", 4); // clear whole screen
-        write(STDOUT_FILENO, "\x1b[H", 3);  // move cursor to 1;1
+        write(STDOUT_FILENO, SEQ_CLEARSCREEN, SIZEOFSEQ(SEQ_CLEARSCREEN));
+        write(STDOUT_FILENO, SEQ_MOVECURSORTOPLEFT, SIZEOFSEQ(SEQ_MOVECURSORTOPLEFT));
         exit(0);
         break;
     default:
@@ -135,8 +246,11 @@ void editorProcessKeypress()
 
 /*** init ***/
 
-void initEditor()
+void initEditor(void)
 {
+    E.cx = 0;
+    E.cy = 0;
+
     if (getWindowSize(&E.screenrows, &E.screencols) == -1)
     {
         die("getWindowSize");
