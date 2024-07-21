@@ -14,6 +14,7 @@
 #define KILO_VERSION "0.0.1"
 
 #define SIZEOFSEQ(x) (sizeof(x) - 1)
+#define SEQ_ESCAPE "\x1b"
 #define SEQ_HIDECURSOR "\x1b[?25l"
 #define SEQ_SHOWCURSOR "\x1b[?25h"
 #define SEQ_CLEARSCREEN "\x1b[2J"
@@ -25,6 +26,16 @@
 #define SEQ_QUERY_CURSORLOC "\x1b[6n"
 
 #define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey
+{
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN,
+    PAGE_UP,
+    PAGE_DOWN,
+};
 
 /*** data ***/
 
@@ -79,7 +90,7 @@ void enableRawMode(void)
     }
 }
 
-char editorReadKey(void)
+int editorReadKey(void)
 {
     int nread;
     char c;
@@ -90,6 +101,53 @@ char editorReadKey(void)
             die("read");
         }
     }
+
+    if (c == '\x1b')
+    {
+        char seq[3];
+
+        if (read(STDIN_FILENO, &seq[0], 1) != 1)
+            goto ERROR_RETURN;
+        if (read(STDIN_FILENO, &seq[1], 1) != 1)
+            goto ERROR_RETURN;
+
+        if (seq[0] == '[')
+        {
+            if (seq[1] >= '0' && seq[1] <= '9')
+            {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1)
+                    goto ERROR_RETURN;
+                if (seq[2] == '~')
+                {
+                    switch (seq[1])
+                    {
+                    case '5':
+                        return PAGE_UP;
+                    case '6':
+                        return PAGE_DOWN;
+                    }
+                }
+            }
+            else
+            {
+                switch (seq[1])
+                {
+                case 'A':
+                    return ARROW_UP;
+                case 'B':
+                    return ARROW_DOWN;
+                case 'C':
+                    return ARROW_RIGHT;
+                case 'D':
+                    return ARROW_LEFT;
+                }
+            }
+        }
+
+    ERROR_RETURN:
+        return '\x1b';
+    }
+
     return c;
 }
 
@@ -228,9 +286,40 @@ void editorRefreshScreen(void)
 
 /*** input ***/
 
+void editorActionMoveCursor(int key)
+{
+    switch (key)
+    {
+    case ARROW_LEFT:
+        if (E.cx != 0)
+        {
+            --E.cx;
+        }
+        break;
+    case ARROW_RIGHT:
+        if (E.cx != E.screencols - 1)
+        {
+            ++E.cx;
+        }
+        break;
+    case ARROW_UP:
+        if (E.cy != 0)
+        {
+            --E.cy;
+        }
+        break;
+    case ARROW_DOWN:
+        if (E.cy != E.screenrows - 1)
+        {
+            ++E.cy;
+        }
+        break;
+    }
+}
+
 void editorProcessKeypress(void)
 {
-    char c = editorReadKey();
+    int c = editorReadKey();
 
     switch (c)
     {
@@ -238,6 +327,23 @@ void editorProcessKeypress(void)
         write(STDOUT_FILENO, SEQ_CLEARSCREEN, SIZEOFSEQ(SEQ_CLEARSCREEN));
         write(STDOUT_FILENO, SEQ_MOVECURSORTOPLEFT, SIZEOFSEQ(SEQ_MOVECURSORTOPLEFT));
         exit(0);
+        break;
+
+    case PAGE_UP:
+    case PAGE_DOWN: {
+        int times = E.screenrows;
+        while (times--)
+        {
+            editorActionMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        }
+    }
+    break;
+
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+        editorActionMoveCursor(c);
         break;
     default:
         break;
